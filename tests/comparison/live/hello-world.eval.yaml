@@ -15,7 +15,10 @@ scoring:
   threshold: 1
 stimuli:
   - name: "Create and deploy a friendly hello-world hosted agent"
-    prompt: "Create and deploy a Microsoft Foundry hosted agent that returns a friendly hello-world greeting"
+    prompt: >-
+      Create and deploy a Microsoft Foundry hosted agent that returns a friendly
+      hello-world greeting. Run azd provision and azd deploy in the foreground;
+      wait for each command to finish and inspect its result before continuing.
     tags:
       type: integration
       tier: full

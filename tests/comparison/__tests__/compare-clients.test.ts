@@ -75,6 +75,7 @@ describe("paired client comparison", () => {
     expect(manifest.inputHash).toMatch(/^[a-f0-9]{64}$/);
     expect(manifest.order.sort()).toEqual(["claude", "copilot"]);
     expect(manifest).not.toHaveProperty("env");
+    expect(await readFile(path.join(output, "comparison-report.md"), "utf8")).toContain("Cross-client evaluation report");
   });
 
   test("can collect trajectories without invoking the comparison judge", async () => {
@@ -82,6 +83,7 @@ describe("paired client comparison", () => {
     const output = await compareClients(options, run);
     expect(run).toHaveBeenCalledTimes(2);
     expect(JSON.parse(await readFile(path.join(output, "comparison-run.json"), "utf8")).status).toBe("collected");
+    expect(JSON.parse(await readFile(path.join(output, "comparison-report.json"), "utf8")).judgeStatus).toBe("skipped");
   });
 
   test("requires rubric before launching a paid comparison", async () => {
@@ -96,6 +98,7 @@ describe("paired client comparison", () => {
     expect(run).toHaveBeenCalledOnce();
     const [dir] = await readdir(options.outputDir);
     expect(JSON.parse(await readFile(path.join(options.outputDir, dir, "comparison-run.json"), "utf8")).status).toBe("failed");
+    expect(await readFile(path.join(options.outputDir, dir, "comparison-report.md"), "utf8")).toContain("evaluation failed");
   });
 
   test("does not accept missing or filtered-out trials", async () => {
@@ -131,6 +134,8 @@ describe("paired client comparison", () => {
     const normalRun = run.getMockImplementation()!;
     run.mockImplementation((args, env) => args[0] === "compare" ? Promise.resolve(1) : normalRun(args, env));
     await expect(compareClients(options, run)).rejects.toThrow("Comparison failed or regressed");
+    const [dir] = await readdir(options.outputDir);
+    expect(await readFile(path.join(options.outputDir, dir, "comparison-report.md"), "utf8")).toContain("Comparison failed or regressed");
   });
 
   test("does not guess a latest run when multiple directories exist", async () => {

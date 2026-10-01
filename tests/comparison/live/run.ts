@@ -12,22 +12,25 @@ const testsDir = path.resolve(import.meta.dirname, "../..");
 const evalSpec = path.join(import.meta.dirname, "hello-world.eval.yaml");
 const exec = promisify(execFile);
 type RunCommand = (args: string[], env: NodeJS.ProcessEnv) => Promise<number>;
+type LiveClient = "both" | "claude";
 type Trial = {
   client: string; group: string; status: string; evidenceDir: string;
   cleanup?: string; outcome?: unknown; error?: string;
 };
 
-export function parseLiveArgs(args: string[]): { comparison: ComparisonOptions; location: string } | undefined {
+export function parseLiveArgs(args: string[]): { comparison: ComparisonOptions; location: string; client: LiveClient } | undefined {
   const { values } = parseArgs({
     args, options: {
       execute: { type: "boolean", default: false }, help: { type: "boolean", short: "h" },
       "copilot-model": { type: "string" }, "claude-model": { type: "string" }, "judge-model": { type: "string" },
+      client: { type: "string", default: "both" },
       location: { type: "string", default: "northcentralus" }, timeout: { type: "string", default: "30m" },
       "output-dir": { type: "string", default: path.join(testsDir, "results-comparison") },
     },
   });
   if (values.help) return undefined;
   if (!values.execute) throw new Error("Pass --execute to authorize paid model calls and two temporary Azure deployments with cleanup.");
+  if (values.client !== "both" && values.client !== "claude") throw new Error("client must be 'both' or 'claude'.");
   if (!/^[a-z0-9]+$/.test(values.location)) throw new Error("Invalid Azure location.");
   const comparison = parseComparisonArgs([
     "--eval-spec", evalSpec, "--copilot-model", values["copilot-model"] ?? "",
@@ -35,7 +38,7 @@ export function parseLiveArgs(args: string[]): { comparison: ComparisonOptions; 
     "--runs", "1", "--timeout", values.timeout, "--output-dir", values["output-dir"],
   ]);
   if (!comparison) throw new Error("Missing comparison options.");
-  return { comparison, location: values.location };
+  return { comparison, location: values.location, client: values.client };
 }
 
 async function defaultSubscription(): Promise<string> {
@@ -58,12 +61,28 @@ async function runVally(args: string[], env: NodeJS.ProcessEnv): Promise<number>
   });
 }
 
+async function runClaudeOnly(options: ComparisonOptions, run: RunCommand): Promise<string> {
+  const outputDir = path.join(options.outputDir, "claude-results");
+  await mkdir(outputDir, { recursive: true });
+  const code = await run([
+    "eval", "--eval-spec", options.evalSpec, "--executor", "claude-cli",
+    "--executor-plugin", path.join(testsDir, "vally", "claude-executor.ts"),
+    "--grader-plugin", path.join(testsDir, "vally", "vally-graders.ts"),
+    "--model", options.claudeModel, "--judge-model", options.judgeModel,
+    "--runs", "1", "--workers", "1", "--max-retries", "0",
+    "--timeout", options.timeout, "--output-dir", outputDir, "--junit",
+  ], { ...process.env, VALLY_FAIR_COMPARISON: "true", VALLY_RUNNER_EXACT_SKILL: "true" });
+  if (code !== 0) throw new Error(`claude evaluation failed (exit ${code}). See ${outputDir}.`);
+  return outputDir;
+}
+
 export async function runLive(
   options: ComparisonOptions, location: string,
   dependencies: {
     subscription?: () => Promise<string>; request?: RequestJson; run?: RunCommand;
     compare?: typeof compareClients;
     pause?: (ms: number) => Promise<void>;
+    client?: LiveClient;
   } = {},
 ): Promise<string> {
   if (options.runs !== 1) throw new Error("Live runner permits exactly one trial per client; rerun for additional isolated trials.");
@@ -71,18 +90,20 @@ export async function runLive(
   const request = dependencies.request ?? azureRequest(subscription);
   const run = dependencies.run ?? runVally;
   const compare = dependencies.compare ?? compareClients;
+  const client = dependencies.client ?? "both";
   const owner = randomBytes(6).toString("hex");
   await mkdir(options.outputDir, { recursive: true });
   const directory = await mkdtemp(path.join(options.outputDir, "foundry-live-"));
   const trials: Trial[] = [];
-  const manifest = { subscription, location, owner, prompt: "Create and deploy a Microsoft Foundry hosted agent that returns a friendly hello-world greeting",
+  const manifest = { subscription, location, owner, client, prompt: "Create and deploy a Microsoft Foundry hosted agent that returns a friendly hello-world greeting",
     status: "running", trials, comparisonDir: "", error: "" };
   const save = () => writeFile(path.join(directory, "live-run.json"), JSON.stringify(manifest, null, 2));
   await save();
   console.log(`Live Foundry artifacts: ${directory}`);
-  console.log(`Using default subscription ${subscription}; region ${location}; one isolated group per client, with cleanup.`);
+  console.log(`Using default subscription ${subscription}; region ${location}; ${client === "claude" ? "Claude only" : "both clients"}, with isolated cleanup.`);
   try {
-    manifest.comparisonDir = await compare({ ...options, outputDir: directory }, async (args, env) => {
+    const execute = client === "claude" ? runClaudeOnly : compare;
+    manifest.comparisonDir = await execute({ ...options, outputDir: directory }, async (args, env) => {
       if (args[0] !== "eval") return run(args, env);
       const executor = args[args.indexOf("--executor") + 1];
       const client = executor === "claude-cli" ? "claude" : executor === "integration-test-agent-runner" ? "copilot" : undefined;
@@ -130,8 +151,10 @@ export async function runLive(
         await cleanup();
       }
     });
-    if (trials.length !== 2 || trials.some(trial => trial.status !== "verified" || trial.cleanup !== "deleted")) {
-      throw new Error("One or both clients failed independent deployment verification. See live-run.json and each live-outcome.json.");
+    const expectedClients = client === "claude" ? ["claude"] : ["claude", "copilot"];
+    if (trials.length !== expectedClients.length || expectedClients.some(name => !trials.some(trial => trial.client === name))
+      || trials.some(trial => trial.status !== "verified" || trial.cleanup !== "deleted")) {
+      throw new Error("One or more clients failed independent deployment verification. See live-run.json and each live-outcome.json.");
     }
     manifest.status = "completed";
     return directory;
@@ -147,8 +170,8 @@ export async function runLive(
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const options = parseLiveArgs(process.argv.slice(2));
-    if (!options) console.log("Usage: npm run compare:foundry-live -- --execute --copilot-model <id> --claude-model <id> --judge-model <id> [--location northcentralus] [--timeout 30m]");
-    else console.log(`Live comparison complete: ${await runLive(options.comparison, options.location)}`);
+    if (!options) console.log("Usage: npm run compare:foundry-live -- --execute --copilot-model <id> --claude-model <id> --judge-model <id> [--client both|claude] [--location northcentralus] [--timeout 30m]");
+    else console.log(`Live run complete: ${await runLive(options.comparison, options.location, { client: options.client })}`);
   } catch (error) {
     console.error(error);
     process.exitCode = 1;

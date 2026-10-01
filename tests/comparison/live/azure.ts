@@ -30,6 +30,16 @@ export class AzureHttpError extends Error {
   }
 }
 
+export function parseAzureJson(raw: string, method: string, url: URL, status: number): unknown {
+  if (!raw.trim()) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Azure ${method} returned invalid JSON (${status}) from ${url.origin}${url.pathname}; received ${Buffer.byteLength(raw)} bytes: ${reason}`, { cause: error });
+  }
+}
+
 export function azureRequest(subscription: string): RequestJson {
   const credential = new AzureCliCredential({ subscription, processTimeoutInMs: 30_000 });
   return async (url, method = "GET", body) => {
@@ -47,8 +57,7 @@ export function azureRequest(subscription: string): RequestJson {
     });
     const raw = await response.text();
     if (!response.ok) throw new AzureHttpError(response.status, `Azure ${method} failed (${response.status}): ${raw.slice(0, 1500)}`);
-    if (!raw.trim()) return null;
-    return JSON.parse(raw) as unknown;
+    return parseAzureJson(raw, method, parsed, response.status);
   };
 }
 

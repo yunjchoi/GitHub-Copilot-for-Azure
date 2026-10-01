@@ -93,6 +93,9 @@ Each invocation creates a unique directory under `tests/results-comparison`
 - `comparison-run.json`: model IDs, settings, input hash, order, exact result
   paths, and status. Environment values and credentials are not included.
 - `comparison.jsonl`: pairwise judge results, unless `--skip-judge` was used.
+- `comparison-report.md` and `comparison-report.json`: readable cross-client
+  comparison and structured measurements, generated automatically (also with
+  `--skip-judge` and on caught run failures).
 
 The runner never guesses the latest run from shared result directories.
 It requires the requested number of trajectories for every stimulus on each
@@ -101,9 +104,60 @@ returns nonzero for a statistically significant negative comparison verdict.
 Individual grader failures remain data for comparison rather than preventing
 the second client from running.
 
-For CI, run this command after setup and upload the entire comparison directory
-with `if: always()`. It does not require modifying the existing nightly
-Copilot-only workflows or dashboard.
+For CI, run this command after setup and publish only `comparison-report.md` and
+`comparison-report.json` with `if: always()`. Raw trajectories can contain
+runtime paths, account metadata, and command output, so do not upload the entire
+comparison directory from a shared workflow. It does not require modifying the
+existing nightly Copilot-only workflows or dashboard.
+
+## Cross-client evaluation report
+
+Open `comparison-report.md` for a side-by-side comparison of **result quality,
+active completion time, tool calls, turns, token usage, and overall assessment**.
+It includes mean/range/sample coverage, trial pass rates, individual grader
+evidence, observed live greetings when present, and links to original trajectories.
+The JSON companion also includes totals and per-trial measurements.
+
+The report uses saved grades and pairwise judgments; it does not run another LLM
+or perform another deployment. Regenerate it for an existing pair from `tests`:
+
+```powershell
+npm run compare:report -- --comparison-dir <comparison-directory>
+```
+
+In Bash, use the same command with your comparison directory:
+
+```bash
+npm run compare:report -- --comparison-dir ./results-comparison/comparison-EXAMPLE
+```
+
+Pass the directory containing `comparison-run.json`, not the enclosing
+`foundry-live-*` directory. The generator reads only the exact result paths in
+that manifest; it never guesses the most recent run. Keep the original result
+files at those paths, or update the manifest paths if moving the artifacts.
+
+- **Quality** uses recorded Vally scores and all-grader pass flags. A successful
+  CLI exit or independently verified deployment does not override a failed rubric.
+- **Active completion time** means the executor's `trajectory.metrics.wallTimeMs`.
+  It includes tool/cloud waits and any setup inside that executor's timer, but
+  excludes grading, resource cleanup, and time between clients. It is not
+  model-processing-only time; outer `durationMs` is deliberately not substituted.
+- **Tool calls** and **turns** use recorded counts. A Claude prompt session can be
+  one native turn while Copilot counts assistant iterations; the report does not
+  rank turn efficiency from those incompatible boundaries.
+- **Tokens** show native input, output, total, cache-read, and cache-write values
+  separately, plus every model observed in usage (including auxiliary models).
+  The native total is input + output; cache is not blindly added because it can
+  overlap input counters. Do not interpret raw total ratios as savings or bills.
+- **Overall assessment** describes observed quality/time/tool-call trade-offs and
+  the existing pairwise preference. It does not collapse unlike units into a
+  composite score. Small samples, missing grades/metrics, unequal trial coverage,
+  and unverified position-swap judgments are explicitly flagged.
+
+Missing measurements are `N/A`, not zero. Partial aggregates state how many trials
+have data. Unequal or missing client trials suppress cross-client rankings.
+Malformed JSON or missing manifest-referenced result files are explicit errors.
+An interrupted run can have a diagnostic report without being a valid comparison.
 
 ## Interpretation
 
@@ -133,6 +187,9 @@ no MCP server or ambient MCP configuration is enabled.
 The eval is in `tests/comparison/live/hello-world.eval.yaml`, intentionally outside
 normal `evals/` discovery and nightly per-skill runs. **Do not invoke that file
 directly**: its custom grader and per-client scope come from this runner.
+
+Pass `--client claude` to run only Claude for a focused live smoke test. The
+default remains the paired Claude/Copilot comparison.
 
 Prerequisites: the Claude setup above, both client logins, working Azure CLI and
 azd authentication, the Foundry azd extension, and built plugins. Run

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadEvalSpec, resolveStimulus } from "@microsoft/vally";
-import { AzureHttpError, createGroup, deleteGroup, responseText, verifyHostedAgent, type RequestJson } from "../live/azure.ts";
+import { AzureHttpError, createGroup, deleteGroup, parseAzureJson, responseText, verifyHostedAgent, type RequestJson } from "../live/azure.ts";
 import { liveContext } from "../live/outcome-grader.ts";
 import { parseLiveArgs, runLive } from "../live/run.ts";
 import { comparisonStimulus } from "../../vally/comparison-policy.ts";
@@ -33,6 +33,17 @@ function verificationRequest() {
 }
 
 describe("independent Foundry outcome", () => {
+  test("identifies malformed Azure JSON without including the response body", () => {
+    const body = '{"secret":"not-logged"';
+    expect(() => parseAzureJson(body, "GET", new URL("https://management.azure.com/subscriptions/test?api-version=1"), 200))
+      .toThrow(/Azure GET returned invalid JSON \(200\) from https:\/\/management\.azure\.com\/subscriptions\/test; received \d+ bytes/);
+    try {
+      parseAzureJson(body, "GET", new URL("https://management.azure.com/subscriptions/test"), 200);
+    } catch (error) {
+      expect(String(error)).not.toContain("not-logged");
+    }
+  });
+
   test("discovers only the owned project and invokes the remote hosted endpoint", async () => {
     const request = verificationRequest();
     expect(await verifyHostedAgent(subscription, group, owner, "hello-world", request))
@@ -219,6 +230,15 @@ describe("live comparison orchestration", () => {
     const parsed = parseLiveArgs(["--execute", "--copilot-model", "claude-sonnet-5", "--claude-model", "claude-sonnet-5", "--judge-model", "gpt-5.5"]);
     expect(parsed?.comparison.runs).toBe(1);
     expect(parsed?.location).toBe("northcentralus");
+    expect(parsed?.client).toBe("both");
+    expect(parseLiveArgs([
+      "--execute", "--client", "claude", "--copilot-model", "claude-sonnet-5",
+      "--claude-model", "claude-sonnet-5", "--judge-model", "gpt-5.5",
+    ])?.client).toBe("claude");
+    expect(() => parseLiveArgs([
+      "--execute", "--client", "other", "--copilot-model", "claude-sonnet-5",
+      "--claude-model", "claude-sonnet-5", "--judge-model", "gpt-5.5",
+    ])).toThrow("client");
     expect(() => liveContext({})).toThrow("requires");
   });
 
@@ -226,7 +246,10 @@ describe("live comparison orchestration", () => {
     const file = path.resolve(import.meta.dirname, "../live/hello-world.eval.yaml");
     const spec = await loadEvalSpec(file);
     expect(spec.stimuli).toHaveLength(1);
-    expect(spec.stimuli[0].prompt).toBe("Create and deploy a Microsoft Foundry hosted agent that returns a friendly hello-world greeting");
+    expect(spec.stimuli[0].prompt).toBe(
+      "Create and deploy a Microsoft Foundry hosted agent that returns a friendly hello-world greeting. "
+      + "Run azd provision and azd deploy in the foreground; wait for each command to finish and inspect its result before continuing.",
+    );
     expect(spec.stimuli[0].graders?.map(grader => grader.type)).toContain("foundry-live-outcome");
     const context = JSON.parse(String(spec.stimuli[0].tags?.systemPrompt)).content as string;
     expect(context).toContain("az tag update --operation Merge");
@@ -305,5 +328,36 @@ describe("live comparison orchestration", () => {
     })).rejects.toThrow("Executable missing");
     expect(groups.size).toBe(0);
     expect(request.mock.calls.some(([, method]) => method === "DELETE")).toBe(true);
+  });
+
+  test("runs only Claude and cleans its independently verified group", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "foundry-live-claude-test-"));
+    roots.push(root);
+    const options: ComparisonOptions = {
+      evalSpec: "", outputDir: root, copilotModel: "claude-sonnet-5", claudeModel: "claude-sonnet-5",
+      judgeModel: "gpt-5.5", runs: 1, timeout: "30m", skipJudge: false, failOnRegression: false,
+    };
+    const groups = new Map<string, unknown>();
+    const request = vi.fn<RequestJson>(async (url, method = "GET", body) => {
+      if (url.includes("/deployments/")) return { properties: { provisioningState: "Succeeded" } };
+      if (method === "PUT") { groups.set(url, body); return body; }
+      if (method === "DELETE") { groups.delete(url); return null; }
+      if (!groups.has(url)) throw new AzureHttpError(404, "missing");
+      return groups.get(url);
+    });
+    const run = vi.fn(async (args: string[], env: NodeJS.ProcessEnv) => {
+      expect(args.slice(args.indexOf("--executor"), args.indexOf("--executor") + 2)).toEqual(["--executor", "claude-cli"]);
+      await writeFile(path.join(env.VALLY_LIVE_EVIDENCE_DIR!, "live-outcome.json"), JSON.stringify({ passed: true }));
+      return 0;
+    });
+    const directory = await runLive(options, "northcentralus", {
+      client: "claude", subscription: async () => subscription, request, run, pause: async () => {},
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(groups.size).toBe(0);
+    const manifest = JSON.parse(await readFile(path.join(directory, "live-run.json"), "utf8"));
+    expect(manifest.client).toBe("claude");
+    expect(manifest.trials).toMatchObject([{ client: "claude", status: "verified", cleanup: "deleted" }]);
+    expect(manifest.status).toBe("completed");
   });
 });

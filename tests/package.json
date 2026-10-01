@@ -16,6 +16,7 @@
     "lint:fix": "eslint --fix",
     "compare:run": "npx tsx ./comparison/run-compare.ts",
     "compare:clients": "tsx ./comparison/compare-clients.ts",
+    "compare:report": "tsx ./comparison/client-report.ts",
     "compare:foundry-live": "tsx ./comparison/live/run.ts",
     "compare:collect": "npx tsx ./comparison/collect-artifacts",
     "skill-improvement": "npx tsx ./skill-improvement/cli.ts"

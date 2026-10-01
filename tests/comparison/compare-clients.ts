@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { loadEvalSpec, parseDuration, ProjectContext, resolveEnvironment, resolveExecutorConfig, resolveStimulus } from "@microsoft/vally";
 import { comparisonSkills, comparisonStimulus } from "../vally/comparison-policy.ts";
+import { generateClientReport } from "./client-report.ts";
 
 const testsDir = path.resolve(import.meta.dirname, "..");
 const require = createRequire(import.meta.url);
@@ -162,11 +163,13 @@ export async function compareClients(options: ComparisonOptions, run: RunCommand
   if (randomInt(2)) clients.reverse();
   const manifest = {
     ...options, inputHash, policy: "fair-comparison-v1", order: clients.map(client => client.name),
+    stimuli: stimuli.map(stimulus => stimulus.name),
     workers: 1, maxRetries: 0, exactSkills: true, earlyTerminate: false, explicitMcpOnly: true,
-    status: "running", results: {} as Record<string, string>,
+    status: "running", results: {} as Record<string, string>, error: "",
   };
   const save = () => writeFile(path.join(outputDir, "comparison-run.json"), JSON.stringify(manifest, null, 2));
   await save();
+  let failure: unknown;
   try {
     for (const client of clients) {
       if (await hashInputs(inputs) !== inputHash) throw new Error("Eval inputs changed during comparison.");
@@ -195,13 +198,21 @@ export async function compareClients(options: ComparisonOptions, run: RunCommand
       if (code !== 0) throw new Error(`Comparison failed or regressed (exit ${code}). See ${outputDir}.`);
     }
     manifest.status = options.skipJudge ? "collected" : "completed";
-    await save();
-    return outputDir;
   } catch (error) {
+    failure = error;
     manifest.status = "failed";
-    await save();
+    manifest.error = error instanceof Error ? error.message : String(error);
+  }
+  await save();
+  try {
+    const report = await generateClientReport(outputDir);
+    console.log(`Cross-client report: ${report}`);
+  } catch (error) {
+    if (manifest.status === "failed") throw new AggregateError([failure, error], "Comparison and report generation both failed.", { cause: error });
     throw error;
   }
+  if (manifest.status === "failed") throw failure;
+  return outputDir;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

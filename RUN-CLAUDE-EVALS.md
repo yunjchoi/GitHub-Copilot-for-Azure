@@ -1,28 +1,23 @@
 # Run evaluations with Claude
 
-These instructions use the local `yunjchoi/vally-claude-executor` worktree:
-
-```text
-C:\Users\yunjchoi\GitHub-Copilot-for-Azure-claude
-```
-
 Use a reviewed eval specification for Claude-only or paired evaluations.
 The dedicated live Foundry comparison below creates and verifies real resources.
+For an on-demand GitHub Actions run backed by a personal Claude subscription,
+follow [the manual CI guide](CLAUDE-MANUAL-CI.md#run-with-your-claude-subscription).
 
 ## 1. Open the worktree and build
 
 Use a dedicated PowerShell terminal:
 
 ```powershell
-Set-Location C:\Users\yunjchoi\GitHub-Copilot-for-Azure-claude
+Set-Location <repository-root>
 git branch --show-current
 npm run build
 if ($LASTEXITCODE -ne 0) { throw "Build failed." }
 ```
 
-The branch should be `yunjchoi/vally-claude-executor`. Dependencies and the
-upstream Vally Claude executor have already been installed/built on this machine.
-For setup on another machine, see [the eval setup guide](evals/README.md#run-with-claude-code).
+Install and build the upstream Vally Claude executor as described in
+[the eval setup guide](evals/README.md#run-with-claude-code).
 
 The test package declares `tsx`, which launches its TypeScript runners, as a
 development dependency. If a runner reports that `tsx` is missing, restore test
@@ -31,10 +26,10 @@ No global installation or on-demand `npx` download is needed for these commands.
 
 ## 2. Configure the executor and authentication
 
-Point to the existing upstream executor build:
+Point to your upstream executor build:
 
 ```powershell
-$vally = "C:\Users\yunjchoi\.copilot\session-state\689f4844-27b7-4b24-a815-7e26f938eaa6\files\vally"
+$vally = "<path-to-vally-worktree>"
 $env:VALLY_CLAUDE_EXECUTOR_MODULE = (Resolve-Path "$vally\plugins\executors\vally-executor-claude-cli\dist\index.js").Path
 
 # Remove overrides that conflict with the comparison policy.
@@ -66,7 +61,7 @@ effects and prerequisites before running. Use the same PowerShell terminal as
 the setup steps.
 
 ```powershell
-Set-Location C:\Users\yunjchoi\GitHub-Copilot-for-Azure-claude\tests
+Set-Location <repository-root>\tests
 
 $claudeModel = "<explicit-Claude-model-ID>"
 $judgeModel = "<Copilot-supported-judge-model-ID>"
@@ -143,6 +138,22 @@ Paths below are relative to the repository root:
 The comparison manifest records the model IDs, trial settings, execution order,
 and exact result paths. `comparison.jsonl` is omitted when using `--skip-judge`.
 
+New comparisons also produce **`comparison-report.md`**, with a side-by-side
+summary of quality, active completion time, tool calls, native turns, token
+breakdowns, and overall assessment. Detailed grader evidence and trajectory links
+are included. A structured copy is saved as `comparison-report.json`.
+
+To generate this report for the saved live pair without rerunning agents or Azure
+deployments, run from `tests`:
+
+```powershell
+npm run compare:report -- --comparison-dir <comparison-directory>
+```
+
+Active completion time includes tool waits but excludes grading and cleanup.
+Native turns and token totals have different accounting across clients; the
+report shows those limitations rather than claiming an efficiency winner.
+
 ## Safety and scope
 
 These runs incur model and judge usage. Their scope and side effects depend on
@@ -170,30 +181,10 @@ npm run compare:foundry-live -- --execute --copilot-model claude-sonnet-5 --clau
 if ($LASTEXITCODE -ne 0) { throw "Live comparison failed; inspect live-run.json and live-outcome.json." }
 ```
 
+Add `--client claude` to run only Claude against this stimulus while retaining
+independent verification and owned-resource cleanup.
+
 This incurs Azure and model charges. See the
 [live comparison guide](tests/comparison/README.md#live-foundry-hello-world-comparison)
 for permissions, independent verification, output paths, and cleanup limitations.
-
-### Completed local live comparison
-
-The completed pair in `tests\results-comparison\foundry-live-28q7aO` used
-`claude-sonnet-5` for both clients and `gpt-5.5` for judging.
-
-| Client | Independent deployment/greeting | Overall graders | Agent wall time |
-| --- | --- | --- | --- |
-| Claude Code | Pass | 4/4 (100%) | 818 seconds |
-| Copilot CLI runner | Pass | 3/4 (75%) | 617 seconds |
-
-Copilot failed the scope rubric because it submitted server-side evaluation
-generation despite the shared instruction not to. Both trial resource groups
-were confirmed deleted. The pairwise judge slightly preferred Claude, but this
-single pair does not establish a general advantage. Per-criterion position-swap
-checks were unverified and defaulted to ties; use the independent evidence and
-individual grades rather than treating the preference as conclusive.
-
-The command exited zero because both independent deployment checks and cleanup
-succeeded; this does **not** mean every rubric passed. Inspect the per-client
-`eval-results.md` as well as `live-run.json`. Trajectories were saved, but Vally
-could not capture workspace patches because the generated samples contained
-nested Git repositories without commits. Token and turn counts are not directly
-comparable across the two native runtimes.
+The CI workflow publishes summarized comparison reports, not raw trajectories.
