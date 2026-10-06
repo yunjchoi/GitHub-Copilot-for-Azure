@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ClaudeIntegrationExecutor, loadClaudeExecutor } from "../claude-executor.ts";
 import { listPlugins } from "../../utils/skill-loader.ts";
-import { executorArgs, parseCliOptions } from "../../run-vally-test.ts";
 
 describe("ClaudeIntegrationExecutor", () => {
   let root: string;
@@ -36,15 +35,13 @@ describe("ClaudeIntegrationExecutor", () => {
       await writeFile(path.join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: test skill\n---\nInstructions.`);
     }
     vi.stubEnv("VALLY_PLUGIN_OUTPUT_ROOT", output);
-    vi.stubEnv("VALLY_RUNNER_EXACT_SKILL", "true");
-    vi.stubEnv("VALLY_RUNNER_DISABLE_AZURE_MCP", "false");
     vi.stubEnv("NO_SKILLS", "false");
     vi.stubEnv("MODEL_OVERRIDE", "");
     vi.stubEnv("CLAUDE_CLI_PATH", "");
-    vi.stubEnv("VALLY_FAIR_COMPARISON", "false");
+    vi.stubEnv("VALLY_FAIR_COMPARISON", "true");
     vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(root, "auth"));
     stimulus = { name: "routing", prompt: "Help with search", tags: { skill: "azure-ai" } };
-    options = { workDir: path.join(root, "workspace"), timeout: 1000 };
+    options = { workDir: path.join(root, "workspace"), timeout: 1000, model: "claude-sonnet-5" };
     await mkdir(options.workDir);
     await writeFile(path.join(options.workDir, "fixture.txt"), "preserved");
     trajectory = {
@@ -83,51 +80,40 @@ describe("ClaudeIntegrationExecutor", () => {
       type: "skill_activation", data: expect.objectContaining({ name: "azure-ai" }),
     }));
     expect(result.metrics.wallTimeMs).toBe(123);
+    expect(construct).toHaveBeenCalledWith(expect.objectContaining({
+      extraArgs: ["--setting-sources", "project", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}"],
+    }));
     expect(shutdown).toHaveBeenCalledOnce();
   });
 
-  test("forwards multi-turn, timeout, environment and custom MCP servers", async () => {
+  test("forwards multi-turn, timeout, environment and explicit MCP servers", async () => {
     stimulus.turns = ["First turn", "Second turn"];
-    options.model = "opus";
     options.env = { TEST_VAR: "value" };
     const custom = { type: "stdio", command: "node", args: ["server.js"] } as const;
     options.mcpServers = { custom: { ...custom, args: [...custom.args] } };
     await adapter.execute(stimulus, options);
     expect(execute).toHaveBeenCalledWith(stimulus, expect.objectContaining({
-      timeout: 1000, model: "opus",
+      timeout: 1000, model: "claude-sonnet-5",
       env: expect.objectContaining({ TEST_VAR: "value" }),
-      mcpServers: {
-        azure: { type: "stdio", command: "npx", args: ["-y", "@azure/mcp", "server", "start"] },
-        custom,
-      },
+      mcpServers: { custom },
     }));
   });
 
-  test("honors model, CLI path, no-skills and disable-Azure-MCP overrides", async () => {
-    vi.stubEnv("MODEL_OVERRIDE", "opus");
+  test("uses an explicit native Claude path when configured", async () => {
     vi.stubEnv("CLAUDE_CLI_PATH", path.join(root, "claude.exe"));
-    vi.stubEnv("NO_SKILLS", "true");
-    vi.stubEnv("VALLY_RUNNER_DISABLE_AZURE_MCP", "true");
-    const result = await adapter.execute(stimulus, options);
-    expect(result.metadata.skillsLoaded).toEqual([]);
-    expect(execute).toHaveBeenCalledWith(stimulus, expect.objectContaining({ model: "opus", mcpServers: {} }));
+    await adapter.execute(stimulus, options);
     expect(construct).toHaveBeenCalledWith(expect.objectContaining({ claudePath: path.join(root, "claude.exe") }));
   });
 
-  test.each(["append", "replace"])("maps %s system prompts and max turns", async mode => {
+  test.each(["append", "replace"])("maps %s system prompts", async mode => {
     stimulus.tags = { skill: "azure-ai", systemPrompt: JSON.stringify({ mode, content: "Be concise." }) };
-    stimulus.constraints = { max_turns: 4 };
     await adapter.execute(stimulus, options);
     expect(construct).toHaveBeenCalledWith(expect.objectContaining({
-      extraArgs: [mode === "replace" ? "--system-prompt" : "--append-system-prompt", "Be concise.", "--max-turns", "4"],
+      extraArgs: [
+        mode === "replace" ? "--system-prompt" : "--append-system-prompt",
+        "Be concise.", "--setting-sources", "project", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}",
+      ],
     }));
-  });
-
-  test("warns explicitly when early termination is unavailable", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-    stimulus.tags = { skill: "azure-ai", earlyTerminate: "[]" };
-    await adapter.execute(stimulus, options);
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("until completion or timeout"));
   });
 
   test.each<Record<string, string>>([
@@ -161,19 +147,13 @@ describe("ClaudeIntegrationExecutor", () => {
     await expect(loadClaudeExecutor()).rejects.toThrow("VALLY_CLAUDE_EXECUTOR_MODULE");
   });
 
-  test("comparison uses exact skills, disables early stops and isolates ambient config", async () => {
-    vi.stubEnv("VALLY_FAIR_COMPARISON", "true");
-    vi.stubEnv("VALLY_RUNNER_EXACT_SKILL", "false");
-    options.model = "claude-sonnet-5";
+  test("disables early stops and isolates ambient config", async () => {
     stimulus.tags = { skill: "azure-ai", earlyTerminate: "[]" };
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const result = await adapter.execute(stimulus, options);
     expect(result.metadata.skillsLoaded).toEqual(["azure-ai"]);
     expect(execute.mock.calls[0][0].tags).not.toHaveProperty("earlyTerminate");
     expect(execute.mock.calls[0][1].mcpServers).toEqual({});
-    expect(construct).toHaveBeenCalledWith(expect.objectContaining({
-      extraArgs: ["--setting-sources", "project", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}"],
-    }));
     const configDir = execute.mock.calls[0][1].env?.CLAUDE_CONFIG_DIR;
     expect(configDir).toBeTruthy();
     expect(configDir).not.toBe(process.env.CLAUDE_CONFIG_DIR);
@@ -182,8 +162,6 @@ describe("ClaudeIntegrationExecutor", () => {
   });
 
   test("comparison copies only auth into its temporary config and removes it on failure", async () => {
-    vi.stubEnv("VALLY_FAIR_COMPARISON", "true");
-    options.model = "claude-sonnet-5";
     await mkdir(process.env.CLAUDE_CONFIG_DIR!);
     await writeFile(path.join(process.env.CLAUDE_CONFIG_DIR!, ".credentials.json"), "{\"test\":true}");
     await writeFile(path.join(process.env.CLAUDE_CONFIG_DIR!, "settings.json"), "{\"testSetting\":true}");
@@ -197,44 +175,5 @@ describe("ClaudeIntegrationExecutor", () => {
     await expect(adapter.execute(stimulus, options)).rejects.toThrow("agent failed");
     await expect(access(isolatedDir)).rejects.toThrow();
     expect(shutdown).toHaveBeenCalledOnce();
-  });
-});
-
-describe("Vally executor selection", () => {
-  afterEach(() => vi.unstubAllEnvs());
-
-  test.each(["--executor", "--agent"])("parses %s and preserves other Vally arguments", flag => {
-    const options = parseCliOptions([flag, "claude-cli", "--skill", "azure-ai", "--runs", "1"]);
-    expect(options.executor).toBe("claude-cli");
-    expect(options.skill).toBe("azure-ai");
-    expect(options.forwardedArgs).toEqual(["--runs", "1"]);
-    expect(executorArgs(options)).toContain(path.resolve(import.meta.dirname, "..", "claude-executor.ts"));
-  });
-
-  test("supports equals syntax and a default Claude model", () => {
-    vi.stubEnv("MODEL_OVERRIDE", "");
-    const args = executorArgs(parseCliOptions(["--executor=claude-cli"]));
-    expect(args.slice(-4)).toEqual(["--executor", "claude-cli", "--model", "sonnet"]);
-    expect(args[1]).toMatch(/results-claude$/);
-  });
-
-  test("does not replace an explicit Claude model", () => {
-    expect(executorArgs(parseCliOptions(["--executor=claude-cli", "--model=opus"]))).not.toContain("--model");
-  });
-
-  test("preserves the default Copilot executor and output directory", () => {
-    const args = executorArgs(parseCliOptions(["--skill", "azure-ai"]));
-    expect(args).toContain(path.resolve(import.meta.dirname, "..", "vally-executor.ts"));
-    expect(args).not.toContain("--executor");
-    expect(args).not.toContain("--model");
-    expect(args[1]).toMatch(/results$/);
-  });
-
-  test.each([
-    { args: ["--executor"] },
-    { args: ["--agent="] },
-    { args: ["--executor", "--runs"] },
-  ])("rejects a missing executor: $args", ({ args }) => {
-    expect(() => parseCliOptions(args)).toThrow("Missing value");
   });
 });

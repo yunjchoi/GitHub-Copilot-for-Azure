@@ -72,7 +72,7 @@ async function runClaudeOnly(options: ComparisonOptions, run: RunCommand): Promi
     "--runs", "1", "--workers", "1", "--max-retries", "0",
     "--timeout", options.timeout, "--output-dir", outputDir, "--junit",
   ], { ...process.env, VALLY_FAIR_COMPARISON: "true", VALLY_RUNNER_EXACT_SKILL: "true" });
-  if (code !== 0) throw new Error(`claude evaluation failed (exit ${code}). See ${outputDir}.`);
+  if (code !== 0) throw new Error(`Claude evaluation failed (exit ${code}). See the Claude result directory in this run.`);
   return outputDir;
 }
 
@@ -103,14 +103,15 @@ export async function runLive(
   console.log(`Using default subscription ${subscription}; region ${location}; ${client === "claude" ? "Claude only" : "both clients"}, with isolated cleanup.`);
   try {
     const execute = client === "claude" ? runClaudeOnly : compare;
-    manifest.comparisonDir = await execute({ ...options, outputDir: directory }, async (args, env) => {
+    const comparisonPath = await execute({ ...options, outputDir: directory }, async (args, env) => {
       if (args[0] !== "eval") return run(args, env);
       const executor = args[args.indexOf("--executor") + 1];
       const client = executor === "claude-cli" ? "claude" : executor === "integration-test-agent-runner" ? "copilot" : undefined;
       if (!client || trials.some(trial => trial.client === client)) throw new Error("Unexpected or repeated live client.");
       const group = `rg-vally-foundry-${owner}-${client}`;
-      const evidenceDir = path.join(directory, client);
-      await mkdir(evidenceDir);
+      const evidenceDir = client;
+      const evidencePath = path.join(directory, evidenceDir);
+      await mkdir(evidencePath);
       const trial: Trial = { client, group, status: "creating", evidenceDir };
       trials.push(trial);
       await save();
@@ -135,7 +136,7 @@ export async function runLive(
         const code = await run([...args, "--grader-plugin", path.join(import.meta.dirname, "outcome-grader.ts")], {
           ...env, VALLY_LIVE_AUTHORIZED: "true", VALLY_LIVE_SUBSCRIPTION: subscription,
           VALLY_LIVE_RESOURCE_GROUP: group, VALLY_LIVE_LOCATION: location, VALLY_LIVE_RUN_ID: owner,
-          VALLY_LIVE_AGENT_NAME: "hello-world", VALLY_LIVE_EVIDENCE_DIR: evidenceDir,
+          VALLY_LIVE_AGENT_NAME: "hello-world", VALLY_LIVE_EVIDENCE_DIR: evidencePath,
           AZURE_SUBSCRIPTION_ID: subscription, AZURE_RESOURCE_GROUP: group, AZURE_RESOURCE_GROUP_NAME: group,
           AZURE_LOCATION: location,
         });
@@ -144,13 +145,14 @@ export async function runLive(
           trial.error = `Vally exited ${code}.`;
           return code;
         }
-        trial.outcome = JSON.parse(await readFile(path.join(evidenceDir, "live-outcome.json"), "utf8")) as unknown;
+        trial.outcome = JSON.parse(await readFile(path.join(evidencePath, "live-outcome.json"), "utf8")) as unknown;
         trial.status = object(trial.outcome, "live outcome").passed === true ? "verified" : "outcome-failed";
         return code;
       } finally {
         await cleanup();
       }
     });
+    manifest.comparisonDir = path.relative(directory, comparisonPath).split(path.sep).join("/");
     const expectedClients = client === "claude" ? ["claude"] : ["claude", "copilot"];
     if (trials.length !== expectedClients.length || expectedClients.some(name => !trials.some(trial => trial.client === name))
       || trials.some(trial => trial.status !== "verified" || trial.cleanup !== "deleted")) {

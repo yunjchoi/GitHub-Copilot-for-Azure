@@ -210,4 +210,11 @@ describe("cross-client reports", () => {
     await rm(path.join(root, "copilot.jsonl"));
     await expect(generateClientReport(root)).rejects.toThrow("ENOENT");
   });
+
+  test("rejects absolute and escaping result paths", async () => {
+    await writeManifest({ results: { copilot: path.join(root, "copilot.jsonl"), claude: "claude.jsonl" } });
+    await expect(generateClientReport(root)).rejects.toThrow("must be relative");
+    await writeManifest({ results: { copilot: "../copilot.jsonl", claude: "claude.jsonl" } });
+    await expect(generateClientReport(root)).rejects.toThrow("must stay inside");
+  });
 });

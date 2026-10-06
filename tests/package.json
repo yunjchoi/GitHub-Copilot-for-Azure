@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "test:vally": "tsx ./run-vally-test.ts",
+    "test:vally": "npx tsx ./run-vally-test.ts",
     "report": "npx tsx scripts/generate-test-reports.ts",
     "upload:token-usage": "npx tsx scripts/upload-token-usage.ts",
     "upload:tool-usage": "npx tsx scripts/upload-tool-usage.ts",
@@ -15,7 +15,7 @@
     "lint": "eslint",
     "lint:fix": "eslint --fix",
     "compare:run": "npx tsx ./comparison/run-compare.ts",
-    "compare:clients": "tsx ./comparison/compare-clients.ts",
+    "compare:setup": "tsx ./comparison/setup.ts",
     "compare:report": "tsx ./comparison/client-report.ts",
     "compare:foundry-live": "tsx ./comparison/live/run.ts",
     "compare:collect": "npx tsx ./comparison/collect-artifacts",

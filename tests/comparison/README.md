@@ -1,261 +1,97 @@
-# Compare Claude Code with the Copilot runner
+# Live Foundry client comparison
 
-Use `npm run compare:clients` from `tests` for a controlled paired evaluation.
-This is separate from `compare:run`, which schedules the existing Copilot-only
-branch/model/with-skills CI matrix.
+This directory contains an opt-in test that asks Copilot CLI and Claude Code to
+create the same Microsoft Foundry hosted hello-world agent. The runner gives
+each client a fresh resource group, independently verifies the deployed agent,
+deletes the group, and writes a side-by-side report.
 
-To add another prompt, fixture, or live outcome, follow
-[Add a comparison scenario](scenarios/README.md). It includes a copyable eval,
-run commands, grading guidance, and the extra lifecycle work needed for live tests.
+The test makes paid model calls and creates temporary Azure resources. Use a
+disposable test subscription and credentials with only the permissions needed
+to create the resources in the assigned groups.
 
 ## Prerequisites
 
-Build the plugins and configure the upstream Claude executor as described in
-[the eval guide](../../evals/README.md#run-with-claude-code). Authenticate both
-clients. The pairwise judge uses Copilot authentication.
+- Node.js 22.14 or later, Git, Azure CLI, and Azure Developer CLI
+- The Microsoft Foundry azd extension
+- Authenticated `az`, `azd`, `copilot`, and `claude` CLIs
+- Permission to create resource groups, Foundry resources, model deployments,
+  and project-scoped role assignments in the Azure CLI default subscription
 
-Choose explicit model versions supported by each provider. The runner rejects
-common floating aliases such as `sonnet` and `latest`, but cannot verify that
-two provider-specific IDs resolve to identical weights. If they do not, label
-the result as a client-and-model comparison.
-
-Remove `MODEL_OVERRIDE` and `NO_SKILLS=true` from your environment. The runner
-rejects them rather than silently overriding the requested experiment.
-
-## Run
-
-Use the same command in PowerShell or Bash (substitute your actual model IDs):
+From the repository root:
 
 ```shell
-npm run compare:clients -- --eval-spec <eval-file> --copilot-model <copilot-model-id> --claude-model <claude-model-id> --judge-model <judge-model-id> --runs 5 --timeout 10m --fail-on-regression
+npm ci
+npm run build
+npm --prefix tests ci
+npm --prefix tests run compare:setup
+azd extension install microsoft.foundry
+az account show
 ```
 
-For example, in PowerShell, the existing Azure AI suite can be collected without
-a pairwise judge:
+`compare:setup` clones the pinned upstream Vally Claude executor into the
+ignored `tests/.cache/` directory and builds it. The test finds that checkout
+automatically, so no developer-specific path is required. To use an existing
+executor build instead, set `VALLY_CLAUDE_EXECUTOR_MODULE` to its
+`dist/index.js`. Set `CLAUDE_CLI_PATH` only when the native Claude executable is
+not on `PATH`.
 
-```powershell
-npm run compare:clients -- --eval-spec ..\evals\azure-skills\azure-ai\eval.yaml --copilot-model "<copilot-model-id>" --claude-model "<claude-model-id>" --judge-model "<judge-model-id>" --runs 3 --skip-judge
+Confirm that `az account show` identifies the intended disposable subscription.
+The runner reads that default subscription once and never changes it.
+
+## Run the Foundry test
+
+From `tests`, run the same command in PowerShell or Bash after substituting
+explicit model IDs supported by your accounts:
+
+```shell
+npm run compare:foundry-live -- --execute --copilot-model <copilot-model-id> --claude-model <claude-model-id> --judge-model <judge-model-id> --location northcentralus --timeout 30m
 ```
 
-`--skip-judge` skips only the final pairwise comparison: the eval's own graders
-still run, including any LLM-backed graders. Without it, every stimulus must
-have a nonempty `rubric`, for example:
+`--execute` is mandatory. The paired run performs exactly one trial per client.
+Use `--client claude` for a Claude-only smoke test; that mode verifies and cleans
+the deployment but does not produce a cross-client report.
 
-```yaml
-rubric:
-  - Completes the user's requested task correctly.
-  - Uses relevant skills and tools without unnecessary resource changes.
-  - Reports failures accurately rather than claiming success.
+The eval is fixed at `comparison/live/hello-world.eval.yaml` and intentionally
+outside normal eval discovery. Do not run it directly because the lifecycle
+wrapper supplies the isolated resource groups, custom verifier, and cleanup.
+
+## Artifacts and report
+
+Each run creates an ignored directory under
+`tests/results-comparison/foundry-live-*` containing:
+
+- `live-run.json`: assigned resource groups, verification status, and cleanup
+- `<client>/live-outcome.json`: independent remote verification evidence
+- `comparison-*/comparison-run.json`: portable run metadata and relative result
+  paths
+- `comparison-*/comparison-report.md`: the side-by-side human-readable report
+- `comparison-*/comparison-report.json`: the structured report
+
+The report compares recorded result quality, active completion time, tool calls,
+native turns, token counters, grader evidence, and pairwise preference. Native
+turn and token boundaries differ between clients, so the report treats those
+values as diagnostic rather than a normalized efficiency or cost score.
+
+Regenerate a report from saved artifacts without rerunning agents or Azure:
+
+```shell
+npm run compare:report -- --comparison-dir <directory-containing-comparison-run.json>
 ```
 
-## What the comparison profile controls
+All persisted links and result locations are relative to the artifact directory.
+The whole `foundry-live-*` directory can therefore be moved to another checkout
+without editing paths.
 
-- Both clients use the same eval file, local fixtures, explicit judge model,
-  trial count, one worker, timeout, and zero automatic retries. The runner
-  randomizes which client goes first and records the order.
-- Built plugin content is snapshotted once for both clients. Each stimulus
-  loads only its sorted, deduplicated `requiredSkills` (or `skill` tag).
-  Missing/ambiguous skills and sets exceeding Copilot's description budget fail.
-- `earlyTerminate` is disabled on both clients with a warning, without editing
-  the eval file. Both run until completion or the shared conversation deadline.
-  Copilot follow-ups use the remaining budget, and timeouts fail the run rather
-  than becoming successful partial trajectories.
-- Prepared-workspace reuse is disabled for Copilot in this mode, so both clients
-  receive fresh trial workspaces.
-- `agent_environment.env` is forwarded to both clients. Only explicit
-  `agent_environment.mcpServers` are enabled; the normal implicit Azure MCP
-  server is **not** added. Declare the servers needed by your eval, pin their
-  package versions, and use the same external credentials/resources.
-- Claude uses strict MCP configuration, project-only settings, and an isolated
-  config directory seeded with its auth file, not personal skills/settings.
-  Upstream handles isolated multi-turn sessions. Copilot uses a temporary home
-  containing only its login metadata, with config discovery and its cross-session
-  store disabled. Skills are explicitly enabled; actual skill paths/names and MCP
-  server inventory are checked before sending the prompt. No permission bypass
-  is added. Environment-token or `gh auth login` authentication also works.
-- Local eval/config/fixture hashes are checked between and after runs. Changed
-  inputs, incomplete trial counts, and subprocess failures stop comparison.
+## Cleanup and failure recovery
 
-Unsupported settings fail before launching the pair: screenshot tags,
-`constraints.max_turns` (different counting semantics), `max_agent_duration`,
-`reasoning_effort`, executor-specific config, `environment.skills`, unsupported
-system-prompt shapes, and MCP `cwd`/`timeout` overrides. Use `requiredSkills`,
-the shared timeout, and an append/replace string system prompt instead.
+The runner creates each group immediately before its client runs and deletes it
+after independent verification. Cleanup checks the exact group name and the
+`vally-run` ownership tag or scoped ARM deployment marker before deletion.
+Conflicting or missing ownership blocks automatic cleanup.
 
-## Artifacts and CI
+Terminal closure, machine failure, or forced cancellation can interrupt cleanup.
+In that case, inspect `live-run.json`, independently verify ownership, and remove
+only the exact recorded groups. Never run broad subscription cleanup.
 
-Each invocation creates a unique directory under `tests/results-comparison`
-(override its parent with `--output-dir`). It contains:
-
-- `plugins/`: the shared built-skill snapshot.
-- `copilot/<run>/results.jsonl` and `claude/<run>/results.jsonl`, plus native
-  Vally/JUnit artifacts.
-- `comparison-run.json`: model IDs, settings, input hash, order, exact result
-  paths, and status. Environment values and credentials are not included.
-- `comparison.jsonl`: pairwise judge results, unless `--skip-judge` was used.
-- `comparison-report.md` and `comparison-report.json`: readable cross-client
-  comparison and structured measurements, generated automatically (also with
-  `--skip-judge` and on caught run failures).
-
-The runner never guesses the latest run from shared result directories.
-It requires the requested number of trajectories for every stimulus on each
-side. An operational failure returns nonzero; `--fail-on-regression` also
-returns nonzero for a statistically significant negative comparison verdict.
-Individual grader failures remain data for comparison rather than preventing
-the second client from running.
-
-For CI, run this command after setup and publish only `comparison-report.md` and
-`comparison-report.json` with `if: always()`. Raw trajectories can contain
-runtime paths, account metadata, and command output, so do not upload the entire
-comparison directory from a shared workflow. It does not require modifying the
-existing nightly Copilot-only workflows or dashboard.
-
-## Cross-client evaluation report
-
-Open `comparison-report.md` for a side-by-side comparison of **result quality,
-active completion time, tool calls, turns, token usage, and overall assessment**.
-It includes mean/range/sample coverage, trial pass rates, individual grader
-evidence, observed live greetings when present, and links to original trajectories.
-The JSON companion also includes totals and per-trial measurements.
-
-The report uses saved grades and pairwise judgments; it does not run another LLM
-or perform another deployment. Regenerate it for an existing pair from `tests`:
-
-```powershell
-npm run compare:report -- --comparison-dir <comparison-directory>
-```
-
-In Bash, use the same command with your comparison directory:
-
-```bash
-npm run compare:report -- --comparison-dir ./results-comparison/comparison-EXAMPLE
-```
-
-Pass the directory containing `comparison-run.json`, not the enclosing
-`foundry-live-*` directory. The generator reads only the exact result paths in
-that manifest; it never guesses the most recent run. Keep the original result
-files at those paths, or update the manifest paths if moving the artifacts.
-
-- **Quality** uses recorded Vally scores and all-grader pass flags. A successful
-  CLI exit or independently verified deployment does not override a failed rubric.
-- **Active completion time** means the executor's `trajectory.metrics.wallTimeMs`.
-  It includes tool/cloud waits and any setup inside that executor's timer, but
-  excludes grading, resource cleanup, and time between clients. It is not
-  model-processing-only time; outer `durationMs` is deliberately not substituted.
-- **Tool calls** and **turns** use recorded counts. A Claude prompt session can be
-  one native turn while Copilot counts assistant iterations; the report does not
-  rank turn efficiency from those incompatible boundaries.
-- **Tokens** show native input, output, total, cache-read, and cache-write values
-  separately, plus every model observed in usage (including auxiliary models).
-  The native total is input + output; cache is not blindly added because it can
-  overlap input counters. Do not interpret raw total ratios as savings or bills.
-- **Overall assessment** describes observed quality/time/tool-call trade-offs and
-  the existing pairwise preference. It does not collapse unlike units into a
-  composite score. Small samples, missing grades/metrics, unequal trial coverage,
-  and unverified position-swap judgments are explicitly flagged.
-
-Missing measurements are `N/A`, not zero. Partial aggregates state how many trials
-have data. Unequal or missing client trials suppress cross-client rankings.
-Malformed JSON or missing manifest-referenced result files are explicit errors.
-An interrupted run can have a diagnostic report without being a valid comparison.
-
-## Interpretation
-
-This controls eval inputs, not every property of the agent runtime. Native
-system prompts, built-in tools, permission decisions, context management, token
-accounting, and timing boundaries still differ. Treat token/time deltas as
-diagnostic, not equivalent billing or a calibrated speed benchmark.
-
-Fresh local workspaces do not reset cloud resources. Use isolated resources per
-trial or deterministic reset steps, pin Git revisions and tool versions, avoid
-client-specific instruction files, and prefer repeated trials over a single
-sample. Never run deployment or destructive prompts against production for
-this comparison.
-
-## Live Foundry hello-world comparison
-
-`compare:foundry-live` is a separate, explicitly authorized live experiment:
-
-> Create and deploy a Microsoft Foundry hosted agent that returns a friendly hello-world greeting
-
-The exact single-turn prompt is identical for both clients. Shared system context
-authorizes a new Python/Responses hosted agent named `hello-world`, in a fresh
-resource group per client, and supplies the region and scope through environment
-variables. Only the `microsoft-foundry` skill is loaded. Azure CLI and azd are used;
-no MCP server or ambient MCP configuration is enabled.
-
-The eval is in `tests/comparison/live/hello-world.eval.yaml`, intentionally outside
-normal `evals/` discovery and nightly per-skill runs. **Do not invoke that file
-directly**: its custom grader and per-client scope come from this runner.
-
-Pass `--client claude` to run only Claude for a focused live smoke test. The
-default remains the paired Claude/Copilot comparison.
-
-Prerequisites: the Claude setup above, both client logins, working Azure CLI and
-azd authentication, the Foundry azd extension, and built plugins. Run
-`az account show` to confirm the **default subscription**; the runner captures its
-ID once without changing the default. The identity must be allowed to create
-resource groups, Foundry projects/model deployments, and necessary scoped role
-assignments. Subscription IDs and credentials are not committed to the eval.
-
-From `tests`, in PowerShell:
-
-```powershell
-$env:CLAUDE_CLI_PATH = (Get-Command claude.exe -ErrorAction Stop).Source
-$env:MODEL_OVERRIDE = $null
-$env:NO_SKILLS = $null
-# Set VALLY_CLAUDE_EXECUTOR_MODULE to your built upstream executor, as above.
-npm run compare:foundry-live -- --execute --copilot-model claude-sonnet-5 --claude-model claude-sonnet-5 --judge-model gpt-5.5 --location northcentralus --timeout 30m
-```
-
-Substitute explicit model IDs your accounts support. `--execute` is mandatory.
-There is exactly **one trial per client**; rerun the command for more independently
-isolated pairs. Provisioning, hosted compute, model calls, and judging incur costs.
-The assigned group is created immediately before its client runs and deleted
-after its grader finishes, before the other client provisions. This reduces quota
-contention; resource names differ, but both clients get the same starting state.
-
-The independent `foundry-live-outcome` grader uses Azure CLI credentials, not
-agent-produced files or claimed URLs. It discovers the single Foundry account and
-project inside the ownership-marked group, checks successful project provisioning,
-checks the named agent's hosted kind and active/deployed version, and sends
-`Please greet me.` to its remote Responses endpoint. Only completed assistant
-output containing a hello-world greeting passes. Prompt-only agents, merely
-generated code, failed API calls, and echoed input do not pass.
-
-Results are under `tests/results-comparison/foundry-live-*/`:
-
-- `live-run.json`: assigned subscription/groups, per-client outcome and cleanup.
-- `claude/live-outcome.json` and `copilot/live-outcome.json`: independent remote
-  evidence or explicit failure reasons.
-- `comparison-*/`: shared skill snapshot, trajectories, per-case grades, manifest,
-  and pairwise judge output.
-
-The runner attempts both clients when their eval processes finish normally, even
-if one outcome grader fails. Operational subprocess failures stop the paired
-runner after cleaning that client's group. Any independent outcome failure,
-unconfirmed cleanup, or comparison process error produces a nonzero exit.
-Per-case LLM grades and pairwise preference are additional evidence, not a
-substitute for the independent outcome gate. One pair is not statistically
-meaningful evidence of a general client advantage.
-
-Cleanup checks the exact group name and ownership marker and waits for Azure to
-confirm deletion. It runs on normal completion and caught failures, but cannot
-guarantee cleanup after terminal closure, Ctrl+C, or machine failure. In that case,
-inspect `live-run.json` and remove only its recorded, ownership-matching groups.
-`azd provision` can replace resource-group tags. The shared instructions require
-both clients to preserve and merge the run tag after provisioning. Before launching
-either client, the harness also records a completed empty ARM deployment named
-`vally-owner-<run-id>` with the owner ID as an output. This provisions no resources.
-If azd removes the group tag, verification/cleanup can use this scoped deployment
-marker instead. A conflicting tag, or missing/invalid markers, blocks automatic
-deletion; the harness never silently retags a group. Inspect the manifest even
-when the command fails, and establish ownership independently before manual
-recovery.
-Never run broad subscription cleanup. Soft-deleted account names may remain
-reserved; future pairs use unique names.
-
-This is **not an OS or RBAC sandbox**: both agents run as your local user, and the
-system instruction is not an enforcement boundary. Prefer an identity restricted
-to a disposable test subscription. The independent verifier checks the assigned
-deployment, not a comprehensive audit of every action in the subscription.
+Raw trajectories can contain command output and account metadata. Review them
+before sharing and do not commit generated result directories or credentials.

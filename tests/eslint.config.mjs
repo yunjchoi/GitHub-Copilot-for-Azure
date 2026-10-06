@@ -39,6 +39,8 @@ export default defineConfig(
       "node_modules/**",
       "dist/**",
       "reports/**",
+      ".cache/**",
+      "results-comparison/**",
       "**/resources/**",
       "**/__snapshots__/**",
       "**/eval/fixtures/**",  // Test fixtures - not real TS projects

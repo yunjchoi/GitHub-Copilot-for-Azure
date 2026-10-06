@@ -3,7 +3,6 @@ import { createHash, randomInt } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { loadEvalSpec, parseDuration, ProjectContext, resolveEnvironment, resolveExecutorConfig, resolveStimulus } from "@microsoft/vally";
 import { comparisonSkills, comparisonStimulus } from "../vally/comparison-policy.ts";
@@ -91,9 +90,15 @@ async function hashInputs(paths: string[]): Promise<string> {
   return hash.digest("hex");
 }
 
+function portableEvalSpec(file: string): string {
+  const relative = path.relative(testsDir, file);
+  return (relative === ".." || relative.startsWith(`..${path.sep}`) ? path.basename(file) : relative)
+    .split(path.sep).join("/");
+}
+
 export async function findComparisonResult(outputDir: string): Promise<string> {
   const dirs = (await readdir(outputDir, { withFileTypes: true })).filter(entry => entry.isDirectory());
-  if (dirs.length !== 1) throw new Error(`Expected exactly one run under ${outputDir}, found ${dirs.length}.`);
+  if (dirs.length !== 1) throw new Error(`Expected exactly one generated run directory, found ${dirs.length}.`);
   const result = path.join(outputDir, dirs[0].name, "results.jsonl");
   await stat(result);
   return result;
@@ -111,7 +116,7 @@ async function assertTrialCounts(result: string, names: string[], runs: number):
     counts.set(stimulus.name, (counts.get(stimulus.name) ?? 0) + 1);
   }
   if (counts.size !== names.length || names.some(name => counts.get(name) !== runs)) {
-    throw new Error(`Incomplete or mismatched trials in ${result}; expected ${runs} for each stimulus.`);
+    throw new Error(`Incomplete or mismatched trials in generated results; expected ${runs} for each stimulus.`);
   }
 }
 
@@ -161,8 +166,18 @@ export async function compareClients(options: ComparisonOptions, run: RunCommand
     { name: "claude", executor: "claude-cli", plugin: "claude-executor.ts", model: options.claudeModel },
   ];
   if (randomInt(2)) clients.reverse();
+  const resultFiles: Record<string, string> = {};
   const manifest = {
-    ...options, inputHash, policy: "fair-comparison-v1", order: clients.map(client => client.name),
+    schemaVersion: 1,
+    evalSpec: portableEvalSpec(options.evalSpec),
+    copilotModel: options.copilotModel,
+    claudeModel: options.claudeModel,
+    judgeModel: options.judgeModel,
+    runs: options.runs,
+    timeout: options.timeout,
+    skipJudge: options.skipJudge,
+    failOnRegression: options.failOnRegression,
+    inputHash, policy: "fair-comparison-v1", order: clients.map(client => client.name),
     stimuli: stimuli.map(stimulus => stimulus.name),
     workers: 1, maxRetries: 0, exactSkills: true, earlyTerminate: false, explicitMcpOnly: true,
     status: "running", results: {} as Record<string, string>, error: "",
@@ -182,20 +197,21 @@ export async function compareClients(options: ComparisonOptions, run: RunCommand
         "--runs", String(options.runs), "--workers", "1", "--max-retries", "0",
         "--timeout", options.timeout, "--output-dir", clientDir, "--junit",
       ], env);
-      if (code !== 0) throw new Error(`${client.name} evaluation failed (exit ${code}). See ${outputDir}.`);
+      if (code !== 0) throw new Error(`${client.name} evaluation failed (exit ${code}). See this comparison directory.`);
       const result = await findComparisonResult(clientDir);
       await assertTrialCounts(result, stimuli.map(stimulus => stimulus.name), options.runs);
-      manifest.results[client.name] = result;
+      resultFiles[client.name] = result;
+      manifest.results[client.name] = path.relative(outputDir, result).split(path.sep).join("/");
       await save();
     }
     if (await hashInputs(inputs) !== inputHash) throw new Error("Eval inputs changed during comparison.");
     if (!options.skipJudge) {
       const code = await run([
-        "compare", "--baseline", manifest.results.copilot, "--treatment", manifest.results.claude,
+        "compare", "--baseline", resultFiles.copilot, "--treatment", resultFiles.claude,
         "--judge-model", options.judgeModel, "--output", path.join(outputDir, "comparison.jsonl"),
         ...(options.failOnRegression ? ["--fail-on-regression"] : []),
       ], env);
-      if (code !== 0) throw new Error(`Comparison failed or regressed (exit ${code}). See ${outputDir}.`);
+      if (code !== 0) throw new Error(`Comparison failed or regressed (exit ${code}). See this comparison directory.`);
     }
     manifest.status = options.skipJudge ? "collected" : "completed";
   } catch (error) {
@@ -213,15 +229,4 @@ export async function compareClients(options: ComparisonOptions, run: RunCommand
   }
   if (manifest.status === "failed") throw failure;
   return outputDir;
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try {
-    const options = parseComparisonArgs(process.argv.slice(2));
-    if (options) console.log(`Comparison artifacts: ${await compareClients(options)}`);
-    else console.log("Usage: npm run compare:clients -- --eval-spec <yaml> --copilot-model <id> --claude-model <id> --judge-model <id> [--runs 5] [--timeout 10m] [--output-dir <dir>] [--skip-judge | --fail-on-regression]");
-  } catch (error) {
-    console.error(error);
-    process.exitCode = 1;
-  }
 }

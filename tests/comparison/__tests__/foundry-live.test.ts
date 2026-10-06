@@ -357,7 +357,11 @@ describe("live comparison orchestration", () => {
     expect(groups.size).toBe(0);
     const manifest = JSON.parse(await readFile(path.join(directory, "live-run.json"), "utf8"));
     expect(manifest.client).toBe("claude");
-    expect(manifest.trials).toMatchObject([{ client: "claude", status: "verified", cleanup: "deleted" }]);
+    expect(manifest.trials).toMatchObject([{
+      client: "claude", status: "verified", cleanup: "deleted", evidenceDir: "claude",
+    }]);
+    expect(manifest.comparisonDir).toBe("claude-results");
+    expect(JSON.stringify(manifest)).not.toContain(directory);
     expect(manifest.status).toBe("completed");
   });
 });

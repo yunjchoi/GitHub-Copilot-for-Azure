@@ -75,6 +75,12 @@ describe("paired client comparison", () => {
     expect(manifest.inputHash).toMatch(/^[a-f0-9]{64}$/);
     expect(manifest.order.sort()).toEqual(["claude", "copilot"]);
     expect(manifest).not.toHaveProperty("env");
+    expect(manifest).not.toHaveProperty("outputDir");
+    expect(manifest.results).toEqual({
+      copilot: "copilot/run-1/results.jsonl",
+      claude: "claude/run-1/results.jsonl",
+    });
+    expect(JSON.stringify(manifest)).not.toContain(root);
     expect(await readFile(path.join(output, "comparison-report.md"), "utf8")).toContain("Cross-client evaluation report");
   });
 
@@ -166,8 +172,8 @@ describe("paired client comparison", () => {
     });
     const manifest = JSON.parse(await readFile(path.join(output, "comparison-run.json"), "utf8"));
     expect(manifest.status).toBe("collected");
-    expect(await readFile(manifest.results.copilot, "utf8")).toContain("\"mock\"");
-    expect(await readFile(manifest.results.claude, "utf8")).toContain("\"mock\"");
+    expect(await readFile(path.join(output, manifest.results.copilot), "utf8")).toContain("\"mock\"");
+    expect(await readFile(path.join(output, manifest.results.claude), "utf8")).toContain("\"mock\"");
   });
 });
 

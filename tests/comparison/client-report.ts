@@ -59,7 +59,7 @@ async function jsonl(file: string): Promise<{ row: ObjectValue; line: number }[]
     try {
       return [{ row: object(JSON.parse(line), "JSONL record"), line: index + 1 }];
     } catch (error) {
-      throw new Error(`Invalid JSONL at ${file}:${index + 1}`, { cause: error });
+      throw new Error(`Invalid JSONL at ${path.basename(file)}:${index + 1}`, { cause: error });
     }
   });
 }
@@ -131,6 +131,15 @@ function cell(stat: Statistic, count: number, formatter = format): string {
 function link(directory: string, file: string): string {
   return path.relative(directory, path.resolve(directory, file)).split(path.sep).map(part => encodeURIComponent(part)).join("/");
 }
+function artifactPath(directory: string, file: string): string {
+  if (path.isAbsolute(file)) throw new Error("Manifest result paths must be relative to the comparison directory.");
+  const resolved = path.resolve(directory, file);
+  const relative = path.relative(directory, resolved);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`)) {
+    throw new Error("Manifest result paths must stay inside the comparison directory.");
+  }
+  return resolved;
+}
 
 export async function generateClientReport(directory: string): Promise<string> {
   directory = path.resolve(directory);
@@ -141,7 +150,7 @@ export async function generateClientReport(directory: string): Promise<string> {
     if (results[id] === undefined) return summarize(id, null, []);
     const source = text(results[id]);
     if (!source) throw new Error(`Missing result path for ${id}.`);
-    const file = path.resolve(directory, source);
+    const file = artifactPath(directory, source);
     const records = await jsonl(file);
     return summarize(id, path.relative(directory, file), records
       .filter(({ row }) => row.type === "trial-result" || (row.type === undefined && "status" in row && "trajectory" in row))

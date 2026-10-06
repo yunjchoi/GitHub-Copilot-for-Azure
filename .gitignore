@@ -360,7 +360,7 @@ dashboard/**/dist/
 
 # Local vally eval outputs
 results/
-tests/results-claude/
 tests/results-comparison/
+tests/.cache/
 tmp/
 .vally-workspaces/

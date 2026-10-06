@@ -4,8 +4,9 @@ import { copyFile, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { getSkillsForTest, listPlugins, loadSkill } from "../utils/skill-loader.ts";
+import { getSkillsForTest, loadSkill } from "../utils/skill-loader.ts";
 import { comparisonMcpServers, comparisonSkills, comparisonStimulus, getCommonSystemPrompt, isComparisonRun } from "./comparison-policy.ts";
+import { executorModule } from "../comparison/setup.ts";
 
 type ClaudeOptions = {
   claudePath?: string;
@@ -21,19 +22,26 @@ function isClaudeModule(value: unknown): value is { ClaudeCliExecutor: ClaudeExe
 
 export async function loadClaudeExecutor(): Promise<ClaudeExecutorConstructor> {
   const modulePath = process.env.VALLY_CLAUDE_EXECUTOR_MODULE;
-  const specifier = modulePath
-    ? pathToFileURL(path.resolve(modulePath)).href
-    : "@microsoft/vally-executor-claude-cli";
+  const cachedModule = pathToFileURL(executorModule).href;
+  const specifier = modulePath ? pathToFileURL(path.resolve(modulePath)).href : cachedModule;
   let upstream: unknown;
   try {
     upstream = await import(specifier);
   } catch (cause) {
-    throw new Error(
-      "Cannot load the Vally Claude executor. Build the upstream plugin and set "
-      + "VALLY_CLAUDE_EXECUTOR_MODULE to its dist/index.js, or install "
-      + "@microsoft/vally-executor-claude-cli in tests/. See evals/README.md.",
-      { cause },
-    );
+    if (!modulePath) {
+      try {
+        const packageName = "@microsoft/vally-executor-claude-cli";
+        upstream = await import(packageName);
+      } catch {
+        throw new Error(
+          "Cannot load the Vally Claude executor. Run 'npm run compare:setup' from tests, "
+          + "or set VALLY_CLAUDE_EXECUTOR_MODULE to an existing dist/index.js.",
+          { cause },
+        );
+      }
+    } else {
+      throw new Error("Cannot load VALLY_CLAUDE_EXECUTOR_MODULE.", { cause });
+    }
   }
   if (!isClaudeModule(upstream)) {
     throw new Error(`${specifier} does not export ClaudeCliExecutor.`);
@@ -74,75 +82,40 @@ export class ClaudeIntegrationExecutor implements Executor {
   }
 
   async execute(stimulus: Stimulus, options: ExecutorOptions): Promise<Trajectory> {
-    const comparison = isComparisonRun();
-    if (comparison) stimulus = comparisonStimulus(stimulus, options);
-    if (stimulus.tags?.takeScreenshot !== undefined) {
-      throw new Error("Claude does not support the takeScreenshot tag. Use integration-test-agent-runner.");
-    }
+    if (!isComparisonRun()) throw new Error("The Claude executor is reserved for the Foundry comparison runner.");
+    stimulus = comparisonStimulus(stimulus, options);
     const extraArgs = systemPromptArgs(stimulus);
-    if (comparison) {
-      extraArgs.push("--setting-sources", "project", "--strict-mcp-config");
-      if (Object.keys(comparisonMcpServers(options)).length === 0) {
-        extraArgs.push("--mcp-config", JSON.stringify({ mcpServers: {} }));
-      }
-    }
-    if (stimulus.constraints?.max_turns !== undefined) {
-      extraArgs.push("--max-turns", String(stimulus.constraints.max_turns));
-    }
-    if (stimulus.tags?.earlyTerminate !== undefined) {
-      console.warn(`[${stimulus.name}] Claude does not support earlyTerminate; the trial runs until completion or timeout.`);
+    extraArgs.push("--setting-sources", "project", "--strict-mcp-config");
+    if (Object.keys(comparisonMcpServers(options)).length === 0) {
+      extraArgs.push("--mcp-config", JSON.stringify({ mcpServers: {} }));
     }
 
-    let skillsLoaded: string[] = [];
-    if (process.env.NO_SKILLS !== "true") {
-      const required = stimulus.tags?.requiredSkills ?? stimulus.tags?.skill;
-      const names = typeof required === "string" ? [required] : required;
-      if (!names?.length) {
-        throw new Error("Claude evals require a skill or requiredSkills tag.");
-      }
-      const allSkills = listPlugins().flatMap(plugin => plugin.skills);
-      const requiredSkills = comparison ? await comparisonSkills(stimulus) : names.map(name => {
-        const matches = allSkills.filter(skill => skill.name === name);
-        if (matches.length !== 1) {
-          throw new Error(`Expected one built skill named '${name}', found ${matches.length}. Run npm run build.`);
-        }
-        return matches[0];
+    const requiredSkills = await comparisonSkills(stimulus);
+    const selected = await getSkillsForTest(requiredSkills, requiredSkills);
+    const skillsDir = path.join(options.workDir, ".claude", "skills");
+    await mkdir(skillsDir, { recursive: true });
+    for (const ref of selected.skillsLoaded) {
+      const skill = await loadSkill(ref);
+      await cp(skill.path, path.join(skillsDir, ref.name), {
+        recursive: true, force: false, errorOnExist: true,
       });
-      const selected = await getSkillsForTest(
-        requiredSkills,
-        comparison || process.env.VALLY_RUNNER_EXACT_SKILL === "true" ? requiredSkills : undefined,
-      );
-      const skillsDir = path.join(options.workDir, ".claude", "skills");
-      await mkdir(skillsDir, { recursive: true });
-      for (const ref of selected.skillsLoaded) {
-        const skill = await loadSkill(ref);
-        // Workspace skills keep unqualified names, matching the existing graders.
-        await cp(skill.path, path.join(skillsDir, ref.name), {
-          recursive: true, force: false, errorOnExist: true,
-        });
-      }
-      skillsLoaded = selected.skillsLoaded.map(skill => skill.name);
     }
+    const skillsLoaded = selected.skillsLoaded.map(skill => skill.name);
 
     const executor = new this.ClaudeCliExecutor({
       claudePath: process.env.CLAUDE_CLI_PATH?.trim() || undefined,
       extraArgs,
     });
-    const configDir = comparison ? await isolatedClaudeConfig() : undefined;
+    const configDir = await isolatedClaudeConfig();
     try {
       const trajectory = await executor.execute(stimulus, {
         ...options,
-        model: process.env.MODEL_OVERRIDE?.trim() || options.model || "sonnet",
+        model: options.model!,
         env: {
           UV_CACHE_DIR: path.join(options.workDir, ".uv-cache"), ...options.env,
-          ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+          CLAUDE_CONFIG_DIR: configDir,
         },
-        mcpServers: comparison ? comparisonMcpServers(options) : {
-          ...(process.env.VALLY_RUNNER_DISABLE_AZURE_MCP === "true" ? {} : {
-            azure: { type: "stdio", command: "npx", args: ["-y", "@azure/mcp", "server", "start"] },
-          }),
-          ...options.mcpServers,
-        },
+        mcpServers: comparisonMcpServers(options),
       });
       // Upstream normalizes Skill to a tool call, but the skill-invocation grader
       // consumes skill_activation events rather than tool calls.
@@ -171,7 +144,7 @@ export class ClaudeIntegrationExecutor implements Executor {
       try {
         await executor.shutdown();
       } finally {
-        if (configDir) await rm(configDir, { recursive: true, force: true });
+        await rm(configDir, { recursive: true, force: true });
       }
     }
   }
