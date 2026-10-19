@@ -76,6 +76,15 @@ npm run compare:run
 npm run compare:collect
 ```
 
+For a local Copilot SDK/CLI versus Claude SDK comparison of the Flask/existing
+Cosmos scenario, run `npm run compare:executors` from this directory. It creates
+an isolated resource group and read-only app identity for each executor, waits
+for verified cleanup between runs, and writes `comparison.txt` and
+`comparison.jsonl` under `results/executor-comparison-<timestamp>/`.
+Both trials deploy live Azure resources. See the
+[scenario guide](../evals/azure-skills/azure-deploy/fixture/flask-existing-cosmos/README.md)
+for authentication, required permissions, cleanup boundaries, and interruption recovery.
+
 ## CI And Nightly Runs
 
 The [test-all-integration workflow](../.github/workflows/test-all-integration.yml) runs skill evals in CI. [skills.json](./skills.json) defines the skills included in scheduled runs and their schedule groups.

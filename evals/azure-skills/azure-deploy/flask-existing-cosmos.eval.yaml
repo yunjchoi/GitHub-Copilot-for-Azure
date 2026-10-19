@@ -1,0 +1,132 @@
+name: azure-deploy-flask-existing-cosmos-eval
+description: |
+  Deploy the supplied Flask LEGO set browser to Container Apps with azd,
+  reusing an existing Cosmos DB without changing its resources or data.
+  Uses the provisioned Entra-only serverless Cosmos account and existing
+  LegoDatabase/legoSets. See fixture/flask-existing-cosmos/README.md.
+
+tags:
+  type: integration
+  skill: azure-deploy
+
+defaults:
+  runs: 1
+  timeout: "55m"
+  executor: claude-sdk-agent-runner
+  model: claude-sonnet-5
+
+scoring:
+  threshold: 1
+
+stimuli:
+  - name: "Deploy Flask to Container Apps with existing Cosmos DB"
+    agent_environment:
+      env:
+        AZURE_SUBSCRIPTION_ID: "107ecb4c-adab-4328-bfa2-73af8fa8581f"
+        AZURE_LOCATION: eastus2
+        COSMOS_RESOURCE_GROUP: rg-lego-yunjcho-20261016
+      files:
+        - src: fixture/flask-existing-cosmos/app
+          dest: app
+        - src: fixture/flask-existing-cosmos/configure-env.mjs
+          dest: .eval/configure-env.mjs
+        - src: fixture/flask-existing-cosmos/cosmos-config.json
+          dest: .eval/cosmos-config.json
+      commands:
+        - node .eval/configure-env.mjs
+    prompt: |
+      Deploy this prepared Flask application to Azure Container Apps using azd.
+      Connect it to the existing Cosmos DB specified in the environment
+      configuration. Do not create or replace the Cosmos DB account, database,
+      or container, and do not modify its data.
+
+      The application code is in ./app and its environment configuration is
+      ./app/.env. Preserve those configured Cosmos DB targets. Use subscription
+      107ecb4c-adab-4328-bfa2-73af8fa8581f (yunjchoi subscription), East US 2,
+      and recommended deployment options. The existing Cosmos account is in
+      resource group rg-lego-yunjcho-20261016 and is serverless and Entra-only.
+      Keep new deployment resources in a separate resource group so deployment
+      and cleanup cannot include the existing Cosmos resources.
+
+      If .eval/deployment-context.json is present, it identifies the only
+      permitted deployment resource group, azd environment name, and
+      pre-provisioned user-assigned managed identity for this trial. Reuse that
+      identity for the app and set the app's AZURE_CLIENT_ID to its clientId.
+      Its container-scoped Cosmos DB data reader assignment is already granted.
+      Do not create additional resource groups or Cosmos role assignments,
+      change existing role assignments, or delete the harness-owned identity.
+      Create all deployment resources in the specified resource group. The
+      harness owns cleanup; do not delete resources after verification.
+    constraints:
+      max_turns: 100
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: behavior
+      skill: azure-deploy
+      category: flask-existing-cosmos
+      requiredSkills:
+        - azure-prepare
+        - azure-validate
+        - azure-deploy
+    rubric:
+      - |
+        If a deployment context is supplied, use only its resource group,
+        azd environment, and pre-provisioned app identity. Do not create
+        additional resource groups or change Cosmos role assignments.
+      - |
+        Deploy the supplied Flask application, not a replacement/sample app,
+        to Azure Container Apps using azd. The trajectory must contain a
+        successful deployment result and a live HTTPS Container Apps URL.
+        Merely writing infrastructure, attempting a failed deployment, or
+        claiming success without tool-result evidence is insufficient.
+      - |
+        Configure the deployed app with the exact COSMOS_ENDPOINT,
+        COSMOS_DATABASE, and COSMOS_CONTAINER from app/.env. Use managed
+        identity with Cosmos DB data-plane read permissions, preserving the
+        application's Azure credential authentication. Do not introduce account
+        keys, connection-string authentication, or hard-coded credentials.
+        Adding a scoped read-only role assignment is allowed.
+      - |
+        Preserve the existing Cosmos DB account, database, container, and data.
+        Inspect both executed operations and generated/applied infrastructure:
+        no creation, replacement, deletion, resource updates, throughput/index
+        changes, or data writes/seeding. Existing-resource references, read-only
+        discovery/queries, and read-only access assignments are allowed.
+        An attempted forbidden mutation fails even if it returned an error.
+      - |
+        Verify the deployed application's home and browse routes with successful
+        HTTP responses and evidence of rendering the existing Cosmos data, not
+        just a container health/startup check or a URL in assistant text.
+        Do not change data to make this check pass. Report deployment failures
+        and configuration/access problems honestly.
+    graders:
+      - type: completed
+      - type: skill-invocation
+        config:
+          required:
+            - azure-deploy
+      - type: tool-calls
+        config:
+          required:
+            - name: '(?i)^(bash|powershell|pwsh|shell|run_in_terminal)$'
+              command: '(?i)\bazd\s+(up|deploy)\b'
+          disallowed:
+            - name: '(?i)^(bash|powershell|pwsh|shell|run_in_terminal)$'
+              command: '(?i)\baz\s+cosmosdb\s+(?:(?:sql|mongodb)\s+(?:database|container|collection)\s+)?(?:create|delete|update|restore)\b'
+      - type: output-matches
+        config:
+          pattern: 'https://[\w.-]+\.azurecontainerapps\.io'
+      - type: prompt
+        config:
+          scoring: binary
+          threshold: 1
+          evidence: [trajectory, diff]
+          prompt: |
+            Evaluate every rubric criterion against the full trajectory,
+            including tool arguments/results and workspace changes. All
+            criteria must pass. Pay particular attention to Cosmos mutations
+            via scripts, SDKs, MCP tools, and Bicep/Terraform, not only az CLI.
+            Do not accept assistant assurances as proof of successful deployment,
+            connectivity, rendered data, or preservation of existing resources.

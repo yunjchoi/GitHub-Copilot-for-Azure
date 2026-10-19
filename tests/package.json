@@ -15,6 +15,7 @@
     "lint": "eslint",
     "lint:fix": "eslint --fix",
     "compare:run": "npx tsx ./comparison/run-compare.ts",
+    "compare:executors": "tsx ./comparison/run-executor-comparison.ts",
     "compare:collect": "npx tsx ./comparison/collect-artifacts",
     "skill-improvement": "npx tsx ./skill-improvement/cli.ts"
   },
@@ -39,6 +40,7 @@
     "html-entities": "^2.6.0",
     "simple-git": "^4.0.2",
     "ts-node": "^10.9.2",
+    "tsx": "^4.23.12",
     "typescript": "6.0.2",
     "typescript-eslint": "^8.70.0",
     "vitest": "^5.0.0",

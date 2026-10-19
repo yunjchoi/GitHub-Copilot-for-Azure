@@ -1,0 +1,5 @@
+{
+  "COSMOS_ENDPOINT": "https://cosmos-lego-yunjcho-20261016-wtcf3i.documents.azure.com:443/",
+  "COSMOS_DATABASE": "LegoDatabase",
+  "COSMOS_CONTAINER": "legoSets"
+}
